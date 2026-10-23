@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mijn pakketbox</title>
+
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      text-align: center;
+      background: #eef2f6;
+      padding: 40px 15px;
+    }
+
+    main {
+      max-width: 450px;
+      margin: auto;
+      background: white;
+      padding: 30px;
+      border-radius: 15px;
+    }
+
+    button {
+      padding: 15px 25px;
+      margin: 8px;
+      border: none;
+      border-radius: 8px;
+      background: #0077cc;
+      color: white;
+      font-size: 18px;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      background: #aaa;
+      cursor: default;
+    }
+
+    #status {
+      font-size: 24px;
+      font-weight: bold;
+    }
+
+    #melding {
+      color: #555;
+    }
+  </style>
+</head>
+
+<body>
+  <main>
+    <h1>Mijn pakketbox</h1>
+
+    <button id="verbindKnop" onclick="verbind()">Verbinden</button>
+    <p id="verbinding">Niet verbonden</p>
+
+    <button id="openKnop" onclick="stuurCommando('open')" disabled>
+      Openen
+    </button>
+
+    <button id="sluitKnop" onclick="stuurCommando('dicht')" disabled>
+      Sluiten
+    </button>
+
+    <p>Status van de box:</p>
+    <p id="status">Onbekend</p>
+    <p id="melding"></p>
+  </main>
+
+  <script>
+    // Deze UUID's komen overeen met config.h op de ESP32.
+    const SERVICE_UUID = "19b10000-e8f2-537e-4f6c-d104768a1214";
+    const BEDIENING_UUID = "19b10001-e8f2-537e-4f6c-d104768a1214";
+    const STATUS_UUID = "19b10002-e8f2-537e-4f6c-d104768a1214";
+
+    let apparaat;
+    let bedieningKenmerk;
+    let statusKenmerk;
+
+    function zetKnoppenAan(aan) {
+      document.getElementById("openKnop").disabled = !aan;
+      document.getElementById("sluitKnop").disabled = !aan;
+    }
+
+    // Ontvangen bytes omzetten naar tekst op de pagina.
+    function ontvangStatus(event) {
+      const tekst = new TextDecoder().decode(event.target.value);
+      document.getElementById("status").textContent = tekst;
+    }
+
+    function verbindingVerbroken() {
+      bedieningKenmerk = null;
+      statusKenmerk = null;
+      zetKnoppenAan(false);
+      document.getElementById("verbindKnop").disabled = false;
+      document.getElementById("verbinding").textContent = "Niet verbonden";
+      document.getElementById("status").textContent = "Onbekend";
+    }
+
+    async function verbind() {
+      if (!navigator.bluetooth) {
+        document.getElementById("melding").textContent =
+          "Open deze pagina in Google Chrome of Microsoft Edge.";
+        return;
+      }
+
+      document.getElementById("verbindKnop").disabled = true;
+      document.getElementById("melding").textContent = "";
+
+      try {
+        // Toon het Bluetooth-keuzevenster.
+        apparaat = await navigator.bluetooth.requestDevice({
+          filters: [{ services: [SERVICE_UUID] }]
+        });
+
+        apparaat.addEventListener(
+          "gattserverdisconnected",
+          verbindingVerbroken
+        );
+
+        // Verbind en zoek onze service en characteristics.
+        const server = await apparaat.gatt.connect();
+        const service = await server.getPrimaryService(SERVICE_UUID);
+
+        bedieningKenmerk = await service.getCharacteristic(BEDIENING_UUID);
+        statusKenmerk = await service.getCharacteristic(STATUS_UUID);
+
+        // Luister naar statusmeldingen van de ESP32.
+        statusKenmerk.addEventListener(
+          "characteristicvaluechanged",
+          ontvangStatus
+        );
+        await statusKenmerk.startNotifications();
+
+        // Vraag ook meteen de huidige status op.
+        await statusKenmerk.readValue();
+
+        document.getElementById("verbinding").textContent =
+          "Verbonden met " + apparaat.name;
+        zetKnoppenAan(true);
+      } catch (fout) {
+        if (apparaat && apparaat.gatt.connected) {
+          apparaat.gatt.disconnect();
+        }
+        verbindingVerbroken();
+        document.getElementById("melding").textContent =
+          "Verbinden mislukt: " + fout.message;
+      }
+    }
+
+    async function stuurCommando(commando) {
+      if (!bedieningKenmerk || !apparaat.gatt.connected) return;
+
+      // Voorkom meerdere gelijktijdige schrijfacties.
+      zetKnoppenAan(false);
+
+      try {
+        const data = new TextEncoder().encode(commando);
+        await bedieningKenmerk.writeValueWithResponse(data);
+
+        document.getElementById("melding").textContent =
+          "Commando verzonden: " + commando;
+
+        // De status wordt bijgewerkt door de ESP32-notificatie.
+      } catch (fout) {
+        document.getElementById("melding").textContent =
+          "Verzenden mislukt: " + fout.message;
+      } finally {
+        zetKnoppenAan(
+          Boolean(bedieningKenmerk && apparaat.gatt.connected)
+        );
+      }
+    }
+  </script>
+</body>
+</html>
